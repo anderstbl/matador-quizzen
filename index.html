@@ -52,6 +52,9 @@
     }
   }
   </script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="preconnect" href="https://ovhxkodhxkirnpcougkx.supabase.co" crossorigin>
   <link
     href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;700;900&family=Oswald:wght@300;400;600&family=Crete+Round&display=swap"
     rel="stylesheet">
@@ -2145,18 +2148,41 @@
     let QCACHE = null;
     let BONUS_CACHE = null;
 
-    // Track recently shown question IDs to avoid repetition
-    const SEEN_KEY = 'matador_seen_ids';
-    const SEEN_MAX = 120; // maks antal gemte "brugte" spørgsmål
-    function getSeenIds() {
-      try { return new Set(JSON.parse(localStorage.getItem(SEEN_KEY) || '[]')); } catch { return new Set(); }
+    // Escape tekst der kommer fra databasen (spørgsmål og spillernavne)
+    // før den sættes ind via innerHTML.
+    const ESC_MAP = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+    function esc(v) {
+      return String(v == null ? '' : v).replace(/[&<>"']/g, c => ESC_MAP[c]);
     }
-    function addSeenIds(ids) {
+
+    // ── HISTORIK OVER VISTE SPØRGSMÅL ──────────────────────────
+    // Gemmes som en LRU-liste: ældst først, senest viste sidst. Rangen
+    // bruges til at vælge de spørgsmål der er længst siden man så.
+    const SEEN_KEY = 'matador_seen_v2';
+    const SEEN_MAX = 400; // dækker hele puljen, så vi får en fuld rangordning
+    const LEGACY_SEEN_KEY = 'matador_seen_ids';
+
+    function qKey(q) { return q.id != null ? 'i' + q.id : 'q' + q.q; }
+
+    function readSeen() {
       try {
-        let seen = JSON.parse(localStorage.getItem(SEEN_KEY) || '[]');
-        seen = [...seen, ...ids];
-        if (seen.length > SEEN_MAX) seen = seen.slice(seen.length - SEEN_MAX);
-        localStorage.setItem(SEEN_KEY, JSON.stringify(seen));
+        const list = JSON.parse(localStorage.getItem(SEEN_KEY) || '[]');
+        return Array.isArray(list) ? list : [];
+      } catch { return []; }
+    }
+    // Map<nøgle, rang> – lavt rang = set for længst siden
+    function getSeenRanks() {
+      return new Map(readSeen().map((k, i) => [k, i]));
+    }
+    function addSeenKeys(keys) {
+      if (!keys.length) return;
+      try {
+        const again = new Set(keys);
+        let list = readSeen().filter(k => !again.has(k)); // gensyn rykker bagerst
+        list.push(...keys);
+        if (list.length > SEEN_MAX) list = list.slice(list.length - SEEN_MAX);
+        localStorage.setItem(SEEN_KEY, JSON.stringify(list));
+        localStorage.removeItem(LEGACY_SEEN_KEY);
       } catch {}
     }
 
@@ -2170,9 +2196,25 @@
 
     async function loadQuestions() {
       if (QCACHE) return QCACHE;
-      const rows = await sbFetch('/rest/v1/questions?select=*&active=eq.true&order=id.asc&limit=500');
+      // Hent i sider. Et fast "limit=500" tabte tavst alt over grænsen – og da
+      // der sorteres på id.asc, var det netop de nyest tilføjede spørgsmål der
+      // aldrig nåede frem til spillet.
+      const PAGE = 500, HARD_MAX = 10000;
+      const rows = [];
+      let step = 0;
+      for (;;) {
+        const page = await sbFetch(
+          '/rest/v1/questions?select=*&active=eq.true&order=id.asc' +
+          '&limit=' + PAGE + '&offset=' + rows.length
+        );
+        if (!page.length) break;
+        rows.push(...page);
+        if (!step) step = page.length; // serverens faktiske sidestørrelse
+        if (page.length < step || rows.length >= HARD_MAX) break;
+      }
       // Normalize to game-internal short format
       QCACHE = rows.map(r => ({
+        id: r.id,
         t: r.type,
         cat: r.category,
         q: r.question,
@@ -2750,34 +2792,57 @@
         }));
       }
 
-      // Filtrer nyligt viste spørgsmål fra – fald tilbage til hele puljen hvis for lille
-      const seen = getSeenIds();
-      function freshFirst(arr) {
-        const fresh = arr.filter(q => !seen.has(q.q)); // brug spørgsmålstekst som nøgle
-        return fresh.length >= 3 ? shuf(fresh) : shuf(arr);
+      // ── Udvælgelse ────────────────────────────────────────────
+      // Rangordn hver kategori: aldrig-sete spørgsmål først (i tilfældig
+      // rækkefølge), derefter dem der er længst siden man så. Tidligere blev
+      // hele kategorien kastet tilbage til ren tilfældighed så snart der var
+      // under 3 usete tilbage – og med små kategorier (billede, skuespiller)
+      // skete det efter et par spil, hvorefter de samme spørgsmål kunne
+      // dukke op igen med det samme.
+      const seenRanks = getSeenRanks();
+      function byFreshness(arr) {
+        const fresh = [], stale = [];
+        for (const q of arr) (seenRanks.has(qKey(q)) ? stale : fresh).push(q);
+        stale.sort((a, b) => seenRanks.get(qKey(a)) - seenRanks.get(qKey(b)));
+        // Bland den ældste halvdel, så rækkefølgen ikke bliver en fast cyklus
+        const half = Math.ceil(stale.length / 2);
+        return [...shuf(fresh), ...shuf(stale.slice(0, half)), ...stale.slice(half)];
       }
 
-      const fills = freshFirst(all.filter(q => q.cat === 'citat_fill'));
-      const whos = freshFirst(all.filter(q => q.cat === 'citat_who'));
-      const reals = freshFirst(all.filter(q => q.cat === 'citat_real'));
-      const facts = freshFirst(all.filter(q => ['handling', 'tidslinje', 'relation', 'lokation'].includes(q.cat)));
-      const billeder = freshFirst(all.filter(q => q.cat === 'billede'));
-      const skuesp = freshFirst(all.filter(q => q.cat === 'skuespiller'));
+      const byCat = {
+        fill:        byFreshness(all.filter(q => q.cat === 'citat_fill')),
+        who:         byFreshness(all.filter(q => q.cat === 'citat_who')),
+        real:        byFreshness(all.filter(q => q.cat === 'citat_real')),
+        fact:        byFreshness(all.filter(q => ['handling', 'tidslinje', 'relation', 'lokation'].includes(q.cat))),
+        billede:     byFreshness(all.filter(q => q.cat === 'billede')),
+        skuespiller: byFreshness(all.filter(q => q.cat === 'skuespiller')),
+      };
 
       // Build 15-question game: 3 fill, 3 who, 2 real, 3 fact, 2 billede, 2 skuespiller
       const seq = ['fill', 'who', 'fill', 'who', 'real', 'fact', 'fill', 'billede', 'who', 'skuespiller', 'fact', 'real', 'billede', 'skuespiller', 'fact'];
-      let fi = 0, wi = 0, ri = 0, faci = 0, bi = 0, si = 0;
-      const pool = seq.map(kind => {
-        if (kind === 'fill') return fills[fi++ % Math.max(1, fills.length)];
-        if (kind === 'who') return whos[wi++ % Math.max(1, whos.length)];
-        if (kind === 'real') return reals[ri++ % Math.max(1, reals.length)];
-        if (kind === 'billede') return billeder[bi++ % Math.max(1, billeder.length)];
-        if (kind === 'skuespiller') return skuesp[si++ % Math.max(1, skuesp.length)];
-        return facts[faci++ % Math.max(1, facts.length)];
-      });
+      const cursor = { fill: 0, who: 0, real: 0, fact: 0, billede: 0, skuespiller: 0 };
+      const picked = [], used = new Set();
 
-      S.qs = pool.filter(Boolean);
-      addSeenIds(S.qs.map(q => q.q)); // gem viste spørgsmål i historik
+      for (const kind of seq) {
+        const list = byCat[kind];
+        while (cursor[kind] < list.length) {
+          const cand = list[cursor[kind]++];
+          if (used.has(qKey(cand))) continue; // aldrig samme spørgsmål to gange i ét spil
+          used.add(qKey(cand)); picked.push(cand);
+          break;
+        }
+      }
+
+      // Er en kategori for lille til sin kvote, fyldes op fra resten – før
+      // gav det tavst et kortere spil (og dermed en lettere bonusrunde).
+      if (picked.length < seq.length) {
+        for (const q of byFreshness(all.filter(q => !used.has(qKey(q))))) {
+          if (picked.length >= seq.length) break;
+          used.add(qKey(q)); picked.push(q);
+        }
+      }
+
+      S.qs = picked;
       showScreen('screen-game');
       render();
     }
@@ -2785,6 +2850,10 @@
     function render() {
       const q = S.qs[S.qi];
       if (!q) { endGame(); return; }   // sikkerhedsguard – pool kan have færre end 15
+      addSeenKeys([qKey(q)]);          // først nu er spørgsmålet reelt "set"
+      // Forudindlæs næste billede, så uret ikke bruges på at vente på det
+      const nextQ = S.qs[S.qi + 1];
+      if (nextQ && nextQ.img) { const pre = new Image(); pre.src = nextQ.img; }
       S.done = false;
       document.getElementById('rfExplanation').className = 'rf-explanation';
       document.getElementById('rfExplanation').textContent = '';
@@ -2797,21 +2866,22 @@
       const bi = BADGE_INFO[q.cat] || BADGE_INFO['citat_fill'];
       badge.textContent = bi.text; badge.className = 'round-badge ' + bi.cls;
 
+      const epTag = q.ep ? `<span class="episode-tag">Ep.${esc(q.ep)} · ${esc(q.etitel)}</span>` : '';
+
       if (q.t === 'fill') {
         const p = q.q.split('___');
-        qText.innerHTML = p[0] + '<span class="blank">___</span>' + (p[1] || '') +
-          (q.who ? `<span class="character-tag">— ${q.who}</span>` : '') +
-          (q.ep ? `<span class="episode-tag">Ep.${q.ep} · ${q.etitel}</span>` : '');
+        qText.innerHTML = esc(p[0]) + '<span class="blank">___</span>' + esc(p[1] || '') +
+          (q.who ? `<span class="character-tag">— ${esc(q.who)}</span>` : '') + epTag;
         const g = makeGrid(shuf([...q.o]), q.a, q, 4);
         ans.innerHTML = ''; ans.appendChild(g);
         startTimer(9);
       } else if (q.t === 'who') {
-        qText.innerHTML = q.q + (q.ep ? `<span class="episode-tag">Ep.${q.ep} · ${q.etitel}</span>` : '');
+        qText.innerHTML = esc(q.q) + epTag;
         const g = makeGrid(shuf([...q.o]), q.a, q, 4);
         ans.innerHTML = ''; ans.appendChild(g);
         startTimer(7);
       } else if (q.t === 'real') {
-        qText.innerHTML = q.q;
+        qText.textContent = q.q;
         ans.innerHTML = '';
         const g = document.createElement('div'); g.className = 'real-fake-grid';
         const rb = mkBtn('ÆGTE', 'rf-btn real-btn', () => answer(q.a === 'ÆGTE', rb, g, q));
@@ -2820,14 +2890,25 @@
         startTimer(6);
       } else if (q.cat === 'billede' || q.cat === 'skuespiller') {
         // billede/skuespiller: vis foto hvis tilgængeligt, gæt karakter eller skuespillernavn
-        const imgHtml = q.img ? `<img src="${q.img}" class="char-illustration" alt="Matador skuespiller" onerror="this.style.display='none'">` : '';
-        qText.innerHTML = imgHtml + q.q;
+        const imgHtml = q.img
+          ? `<img src="${esc(q.img)}" class="char-illustration" alt="Billede fra Matador" decoding="async">`
+          : '';
+        qText.innerHTML = imgHtml + esc(q.q);
         const g = makeGrid(shuf([...q.o]), q.a, q, 4);
         ans.innerHTML = ''; ans.appendChild(g);
         startTimer(12);
+        // Nulstil uret når billedet faktisk er på skærmen, så indlæsningstiden
+        // ikke æder af de 12 sekunder (og et dødt link ikke koster spilletid).
+        const im = qText.querySelector('img');
+        if (im && !im.complete) {
+          const myQi = S.qi;
+          const restart = () => { if (S.qi === myQi && !S.done) startTimer(12); };
+          im.addEventListener('load', restart, { once: true });
+          im.addEventListener('error', () => { im.style.display = 'none'; restart(); }, { once: true });
+        }
       } else {
         // fact: handling / tidslinje / relation / lokation
-        qText.innerHTML = q.q + (q.ep ? `<span class="episode-tag">Ep.${q.ep} · ${q.etitel}</span>` : '');
+        qText.innerHTML = esc(q.q) + epTag;
         const g = makeGrid(shuf([...q.o]), q.a, q, 4);
         ans.innerHTML = ''; ans.appendChild(g);
         startTimer(10);
@@ -3114,7 +3195,7 @@
           const medal = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : '';
           return `<div style="display:flex;justify-content:space-between;padding:3px 12px;${i % 2 === 0 ? 'background:rgba(26,72,56,0.04)' : ''}">
         <span style="color:#7A7A8A;min-width:22px">${i + 1}.</span>
-        <span style="flex:1;text-align:left;color:#1A4838;letter-spacing:1px;">${medal}${s.initials}</span>
+        <span style="flex:1;text-align:left;color:#1A4838;letter-spacing:1px;">${medal}${esc(s.initials)}</span>
         <span style="color:#1A4838;font-weight:bold;">${s.score.toLocaleString('da-DK')}</span>
       </div>`;
         }).join('');
@@ -3138,7 +3219,7 @@
         let rows = scores.map((s, i) => {
           const d = new Date(s.created_at).toLocaleDateString('da-DK');
           const hl = hlI && s.initials === hlI && s.score === hlS && !matched; if (hl) matched = true;
-          return `<tr class="${hl ? 'highlight' : ''}"><td class="rank">${i + 1}</td><td class="initials-cell">${s.initials}</td><td class="score-cell">${s.score.toLocaleString('da-DK')}</td><td class="date-cell">${d}</td></tr>`;
+          return `<tr class="${hl ? 'highlight' : ''}"><td class="rank">${i + 1}</td><td class="initials-cell">${esc(s.initials)}</td><td class="score-cell">${s.score.toLocaleString('da-DK')}</td><td class="date-cell">${esc(d)}</td></tr>`;
         }).join('');
         content.innerHTML = `<table class="scores-table"><thead><tr><th>#</th><th>Navn</th><th>Score</th><th>Dato</th></tr></thead><tbody>${rows}</tbody></table>`;
       }
@@ -3391,8 +3472,8 @@
           : qRaw;
         const epLabel = r.episode ? `Afsnit ${r.episode}` : '';
         return `<div class="nqp-item">
-          <div class="nqp-teaser">${trimmed}</div>
-          <div class="nqp-meta">${cat}${epLabel ? ' · ' + epLabel : ''}</div>
+          <div class="nqp-teaser">${esc(trimmed)}</div>
+          <div class="nqp-meta">${esc(cat)}${epLabel ? ' · ' + esc(epLabel) : ''}</div>
         </div>`;
       }).join('');
 
@@ -3407,6 +3488,9 @@
     document.addEventListener('DOMContentLoaded', () => {
       loadHomeTop10();
       loadNewQuestions();
+      // Forudindlæs spørgsmål i baggrunden, så spillet starter med det samme.
+      // Fejl ignoreres – startGame() har sin egen fejlhåndtering.
+      loadQuestions().catch(() => {});
     });
 
   </script>
