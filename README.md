@@ -10,7 +10,9 @@
 
 Matador-quizzen er en browserbaseret quiz dedikeret til DR's ikoniske TV-serie *Matador* (1978–1982). Spillet trækker spørgsmål fra en live database og holder styr på en global highscore-liste, så du kan måle dig med andre Korsbæk-kendere.
 
-Designet er inspireret af seriens æra – art deco, guldfarvede ornamenter, filmkorn og seriffen skrift fra 1930'erne.
+Designet er en illustreret quizplakat inspireret af 1930’erne: creme, flaskegrøn, vinrød og okkergul, store figurer, talebobler, stjernemærkater, afrundede spørgsmålskort og store svarknapper. Spørgsmål og spillogik er bevaret.
+
+Forsiden bruger fotos fra serien med billedkilder nederst på siden: Mads (DR via Timbro), Maude (Rolf Konow/DR via Sveriges Radio) og Røde med Laura (IMDb). Fotos hentes fra de eksterne billedværter. Bevægelse i taleboble og kategoribånd slås fra ved reduceret bevægelse.
 
 ## Features
 
@@ -18,17 +20,17 @@ Designet er inspireret af seriens æra – art deco, guldfarvede ornamenter, fil
 - **Combo & speedbonus** – svar hurtigt og rigtigt i træk for at score ekstra point
 - **Global highscore** – Top 100 over Matadors bedste kendere, gemt i Supabase
 - **Del din score** – knap til deling på sociale medier med Open Graph-preview
-- **Art Deco design** – guldfarvede dekorationer, filmkornsoverlay og 1930'er-typografi
+- **Gameshow-design** – stor tekst, tydelig kontrast, svarknapper med A–D og markant score og timer
 - **Mobilvenlig** – responsivt layout der virker på alle skærmstørrelser
 
 ## Teknisk stack
 
 | Del | Teknologi |
 |-----|-----------|
-| Frontend | Vanilla HTML/CSS/JavaScript (én fil) |
+| Frontend | Vanilla HTML/CSS/JavaScript (`index.html` og `quiz.css`) |
 | Hosting | [Vercel](https://vercel.com) |
 | Database & API | [Supabase](https://supabase.com) (PostgreSQL + REST) |
-| Fonte | Playfair Display, Oswald, Crete Round (Google Fonts) |
+| Typografi | Georgia til overskrifter; Arial / Helvetica til spørgsmål og svar |
 
 Ingen build-trin, ingen afhængigheder – åbn `index.html` direkte i en browser under udvikling.
 
@@ -58,3 +60,4 @@ Projektet deployes automatisk til Vercel ved push til `main`.
 ---
 
 *Lavet med kærlighed til Korsbæk.*
+
